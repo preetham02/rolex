@@ -6,12 +6,14 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.URI;
+import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
-import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
-import java.util.List;
+import java.util.HashMap;
 import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 public class PromServer {
 
@@ -30,10 +32,9 @@ public class PromServer {
     static class QueryHandler implements HttpHandler {
         @Override
         public void handle(HttpExchange t) throws IOException {
-            logQuery(t);
+            processQuery(t);
 
             // Fake response for instant query
-            // Using a text block for JSON response
             long now = Instant.now().getEpochSecond();
             String response = """
                 {
@@ -61,7 +62,7 @@ public class PromServer {
     static class QueryRangeHandler implements HttpHandler {
         @Override
         public void handle(HttpExchange t) throws IOException {
-            logQuery(t);
+            processQuery(t);
 
             // Fake response for range query
             long now = Instant.now().getEpochSecond();
@@ -92,23 +93,94 @@ public class PromServer {
         }
     }
 
-    private static void logQuery(HttpExchange t) {
+    private static void processQuery(HttpExchange t) {
         URI requestURI = t.getRequestURI();
-        String query = "";
         String rawQuery = requestURI.getRawQuery();
+        Map<String, String> params = parseQueryParams(rawQuery);
         
-        // Simple parsing to extract 'query' param for logging, or just log the full raw query
-        if (rawQuery != null) {
-            // Find "query=" parameter if possible, otherwise just use raw
-            // This is a naive logger, for production use a proper parser
-            query = rawQuery; 
-        }
-
-        String timestamp = DateTimeFormatter.ISO_INSTANT
-            .format(Instant.now());
+        String promQuery = params.get("query");
+        String timestamp = DateTimeFormatter.ISO_INSTANT.format(Instant.now());
+        
+        System.out.printf("[%s] Method: %s, Path: %s%n", 
+            timestamp, t.getRequestMethod(), requestURI.getPath());
             
-        System.out.printf("[%s] Method: %s, Path: %s, Query Params: %s%n", 
-            timestamp, t.getRequestMethod(), requestURI.getPath(), query);
+        if (promQuery != null) {
+            System.out.println("    PromQL: " + promQuery);
+            String sql = convertToSQL(promQuery);
+            System.out.println("    SQL:    " + sql);
+        } else {
+            System.out.println("    No query parameter found");
+        }
+    }
+
+    private static Map<String, String> parseQueryParams(String query) {
+        if (query == null) return Map.of();
+        Map<String, String> result = new HashMap<>();
+        for (String param : query.split("&")) {
+            String[] entry = param.split("=");
+            if (entry.length > 1) {
+                result.put(
+                    URLDecoder.decode(entry[0], StandardCharsets.UTF_8), 
+                    URLDecoder.decode(entry[1], StandardCharsets.UTF_8)
+                );
+            }
+        }
+        return result;
+    }
+
+    private static String convertToSQL(String promQuery) {
+        if (promQuery == null || promQuery.isEmpty()) return "INVALID QUERY";
+        
+        // Basic parser for metric{label="value"}
+        // This is a simplified regex and won't handle all PromQL nuances (like nested braces in values)
+        // Group 1: Metric Name
+        // Group 2: Labels block (optional)
+        Pattern p = Pattern.compile("^([a-zA-Z_:][a-zA-Z0-9_:]*)(\\{.*\\})?$");
+        Matcher m = p.matcher(promQuery);
+        
+        if (m.find()) {
+            String metricName = m.group(1);
+            String labelPart = m.groupCount() >= 2 ? m.group(2) : null;
+            
+            StringBuilder sql = new StringBuilder("SELECT * FROM metrics WHERE name = '");
+            sql.append(metricName).append("'");
+            
+            if (labelPart != null && !labelPart.isEmpty()) {
+                // Remove outer {}
+                String labels = labelPart.substring(1, labelPart.length() - 1);
+                
+                // Split by comma. Note: This breaks if label values contain commas.
+                // A proper parser would be needed for full support.
+                String[] pairs = labels.split(",");
+                for (String pair : pairs) {
+                    String[] kv = pair.split("=");
+                    if (kv.length == 2) {
+                        String key = kv[0].trim();
+                        String value = kv[1].trim();
+                        
+                        // Convert double quotes to single quotes for SQL
+                        // value is likely "something", we want 'something'
+                        if (value.startsWith("\"") && value.endsWith("\"")) {
+                            value = "'" + value.substring(1, value.length() - 1) + "'";
+                        } else if (value.startsWith("'") && value.endsWith("'")) {
+                            // already single quoted
+                        } else {
+                            // unquoted? treat as string
+                            value = "'" + value + "'";
+                        }
+                        
+                        // Handle operators like !=, =~, !~ later. Assuming = for now.
+                        // If the split was by =, check if previous char was ! or ~
+                        // For this simple parser, we assume =
+                        
+                        sql.append(" AND labels->>'").append(key).append("' = ").append(value);
+                    }
+                }
+            }
+            return sql.toString();
+        }
+        
+        return "-- Complex or unsupported PromQL query: " + promQuery;
     }
 
     private static void sendResponse(HttpExchange t, String response) throws IOException {
@@ -120,4 +192,3 @@ public class PromServer {
         }
     }
 }
-
