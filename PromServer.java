@@ -130,57 +130,82 @@ public class PromServer {
 
     private static String convertToSQL(String promQuery) {
         if (promQuery == null || promQuery.isEmpty()) return "INVALID QUERY";
+
+        // Check for function call: func(arg)
+        Pattern funcPattern = Pattern.compile("^([a-zA-Z_]+)\\((.+)\\)$");
+        Matcher funcMatcher = funcPattern.matcher(promQuery);
+
+        if (funcMatcher.find()) {
+            String funcName = funcMatcher.group(1);
+            String args = funcMatcher.group(2);
+            return convertSelectorToSQL(args, funcName);
+        }
         
-        // Basic parser for metric{label="value"}
-        // This is a simplified regex and won't handle all PromQL nuances (like nested braces in values)
+        // Default to selection
+        return convertSelectorToSQL(promQuery, null);
+    }
+
+    private static String convertSelectorToSQL(String selector, String function) {
+        // Regex for metric name, optional labels, optional range
         // Group 1: Metric Name
-        // Group 2: Labels block (optional)
-        Pattern p = Pattern.compile("^([a-zA-Z_:][a-zA-Z0-9_:]*)(\\{.*\\})?$");
-        Matcher m = p.matcher(promQuery);
+        // Group 2: Labels block (optional, includes {})
+        // Group 3: Range block (optional, includes [])
+        // Group 4: Range duration (inside [])
+        Pattern p = Pattern.compile("^([a-zA-Z_:][a-zA-Z0-9_:]*)(\\{.*\\})?(\\[([0-9]+[smhdwy])\\])?$");
+        Matcher m = p.matcher(selector);
         
         if (m.find()) {
             String metricName = m.group(1);
-            String labelPart = m.groupCount() >= 2 ? m.group(2) : null;
+            String labelPart = m.group(2);
+            String rangeDuration = m.group(4);
             
-            StringBuilder sql = new StringBuilder("SELECT * FROM metrics WHERE name = '");
-            sql.append(metricName).append("'");
+            StringBuilder sql = new StringBuilder("SELECT ");
+            
+            // Determine SELECT clause based on function
+            if (function != null) {
+                switch (function) {
+                    case "avg_over_time" -> sql.append("AVG(value)");
+                    case "max_over_time" -> sql.append("MAX(value)");
+                    case "stddev_over_time" -> sql.append("STDDEV(value)");
+                    case "sum_over_time" -> sql.append("SUM(value)");
+                    case "count_over_time" -> sql.append("COUNT(value)");
+                    case "delta" -> sql.append("value - LAG(value) OVER (ORDER BY time)"); // Simplified representation
+                    case "deriv" -> sql.append("REGR_SLOPE(value, EXTRACT(EPOCH FROM time))");
+                    default -> sql.append(function.toUpperCase()).append("(value)");
+                }
+            } else {
+                sql.append("*");
+            }
+            
+            sql.append(" FROM metrics WHERE name = '").append(metricName).append("'");
             
             if (labelPart != null && !labelPart.isEmpty()) {
-                // Remove outer {}
                 String labels = labelPart.substring(1, labelPart.length() - 1);
-                
-                // Split by comma. Note: This breaks if label values contain commas.
-                // A proper parser would be needed for full support.
                 String[] pairs = labels.split(",");
                 for (String pair : pairs) {
                     String[] kv = pair.split("=");
                     if (kv.length == 2) {
                         String key = kv[0].trim();
                         String value = kv[1].trim();
-                        
-                        // Convert double quotes to single quotes for SQL
-                        // value is likely "something", we want 'something'
                         if (value.startsWith("\"") && value.endsWith("\"")) {
                             value = "'" + value.substring(1, value.length() - 1) + "'";
-                        } else if (value.startsWith("'") && value.endsWith("'")) {
-                            // already single quoted
-                        } else {
-                            // unquoted? treat as string
+                        } else if (!value.startsWith("'")) {
                             value = "'" + value + "'";
                         }
-                        
-                        // Handle operators like !=, =~, !~ later. Assuming = for now.
-                        // If the split was by =, check if previous char was ! or ~
-                        // For this simple parser, we assume =
-                        
                         sql.append(" AND labels->>'").append(key).append("' = ").append(value);
                     }
                 }
             }
+            
+            if (rangeDuration != null) {
+                // Convert duration to SQL interval approx
+                sql.append(" AND time >= NOW() - INTERVAL '").append(rangeDuration).append("'");
+            }
+            
             return sql.toString();
         }
         
-        return "-- Complex or unsupported PromQL query: " + promQuery;
+        return "-- Complex or unsupported PromQL query: " + selector;
     }
 
     private static void sendResponse(HttpExchange t, String response) throws IOException {
