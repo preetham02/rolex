@@ -5,8 +5,6 @@ import com.sun.net.httpserver.HttpServer;
 import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.OutputStream;
-import java.io.InputStream;
-import java.io.ByteArrayOutputStream;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.URLDecoder;
@@ -82,18 +80,7 @@ public class PromServer {
     private static void processQuery(HttpExchange t, String resultType) throws IOException {
         URI requestURI = t.getRequestURI();
         String rawQuery = requestURI.getRawQuery();
-        Map<String, String> params = new HashMap<>(parseQueryParams(rawQuery));
-        
-        // Handle POST body parameters
-        if ("POST".equalsIgnoreCase(t.getRequestMethod())) {
-            try (InputStream is = t.getRequestBody()) {
-                String body = new String(is.readAllBytes(), StandardCharsets.UTF_8);
-                if (!body.isEmpty()) {
-                    Map<String, String> bodyParams = parseQueryParams(body);
-                    params.putAll(bodyParams);
-                }
-            }
-        }
+        Map<String, String> params = parseQueryParams(rawQuery);
         
         String promQuery = params.get("query");
         String timestamp = DateTimeFormatter.ISO_INSTANT.format(Instant.now());
