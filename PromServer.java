@@ -2,8 +2,11 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
 
+import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.OutputStream;
+import java.io.InputStream;
+import java.io.ByteArrayOutputStream;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.URLDecoder;
@@ -11,13 +14,28 @@ import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.format.DateTimeFormatter;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.Properties;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.time.Duration;
+import java.util.Base64;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
+import java.util.ArrayList;
 
 public class PromServer {
 
+    private static String BACKEND_TYPE;
+    private static String BACKEND_URI;
+    private static String BACKEND_USER;
+    private static String BACKEND_PASSWORD;
+
     public static void main(String[] args) throws IOException {
+        loadConfig();
         int port = 9090;
         HttpServer server = HttpServer.create(new InetSocketAddress(port), 0);
 
@@ -29,74 +47,53 @@ public class PromServer {
         server.start();
     }
 
+    private static void loadConfig() {
+        Properties prop = new Properties();
+        try (FileInputStream input = new FileInputStream("config.properties")) {
+            prop.load(input);
+            BACKEND_TYPE = prop.getProperty("backend", "couchbase");
+            BACKEND_URI = prop.getProperty("uri", "http://localhost:9600/query/service");
+            BACKEND_USER = prop.getProperty("username", "");
+            BACKEND_PASSWORD = prop.getProperty("password", "");
+            System.out.println("Loaded config: backend=" + BACKEND_TYPE + ", uri=" + BACKEND_URI);
+        } catch (IOException ex) {
+            System.err.println("Could not load config.properties, using defaults.");
+            BACKEND_TYPE = "couchbase";
+            BACKEND_URI = "http://localhost:9600/query/service";
+            BACKEND_USER = "couchbase";
+            BACKEND_PASSWORD = "couchbase";
+        }
+    }
+
     static class QueryHandler implements HttpHandler {
         @Override
         public void handle(HttpExchange t) throws IOException {
-            processQuery(t);
-
-            // Fake response for instant query
-            long now = Instant.now().getEpochSecond();
-            String response = """
-                {
-                    "status": "success",
-                    "data": {
-                        "resultType": "vector",
-                        "result": [
-                            {
-                                "metric": {
-                                    "__name__": "fake_metric",
-                                    "job": "fake_job",
-                                    "instance": "fake_instance"
-                                },
-                                "value": [%d, "123.45"]
-                            }
-                        ]
-                    }
-                }
-                """.formatted(now);
-
-            sendResponse(t, response);
+            processQuery(t, "vector");
         }
     }
 
     static class QueryRangeHandler implements HttpHandler {
         @Override
         public void handle(HttpExchange t) throws IOException {
-            processQuery(t);
-
-            // Fake response for range query
-            long now = Instant.now().getEpochSecond();
-            String response = """
-                {
-                    "status": "success",
-                    "data": {
-                        "resultType": "matrix",
-                        "result": [
-                            {
-                                "metric": {
-                                    "__name__": "fake_metric",
-                                    "job": "fake_job",
-                                    "instance": "fake_instance"
-                                },
-                                "values": [
-                                    [%d, "100"],
-                                    [%d, "110"],
-                                    [%d, "120"]
-                                ]
-                            }
-                        ]
-                    }
-                }
-                """.formatted(now - 60, now - 30, now);
-
-            sendResponse(t, response);
+            processQuery(t, "matrix");
         }
     }
 
-    private static void processQuery(HttpExchange t) {
+    private static void processQuery(HttpExchange t, String resultType) throws IOException {
         URI requestURI = t.getRequestURI();
         String rawQuery = requestURI.getRawQuery();
-        Map<String, String> params = parseQueryParams(rawQuery);
+        Map<String, String> params = new HashMap<>(parseQueryParams(rawQuery));
+        
+        // Handle POST body parameters
+        if ("POST".equalsIgnoreCase(t.getRequestMethod())) {
+            try (InputStream is = t.getRequestBody()) {
+                String body = new String(is.readAllBytes(), StandardCharsets.UTF_8);
+                if (!body.isEmpty()) {
+                    Map<String, String> bodyParams = parseQueryParams(body);
+                    params.putAll(bodyParams);
+                }
+            }
+        }
         
         String promQuery = params.get("query");
         String timestamp = DateTimeFormatter.ISO_INSTANT.format(Instant.now());
@@ -106,12 +103,131 @@ public class PromServer {
             
         if (promQuery != null) {
             System.out.println("    PromQL: " + promQuery);
-            String sql = convertToSQL(promQuery);
+
+            String sql = convertPromToSQL(promQuery);
             System.out.println("    SQL:    " + sql);
+
+            try {
+                String responseJson = executeQuery(sql);
+                String promResponse = transformToPromResponse(responseJson, resultType);
+                sendResponse(t, promResponse);
+            } catch (Exception e) {
+                e.printStackTrace();
+                String errorResponse = "{\"status\":\"error\",\"errorType\":\"execution\",\"error\":\"" + e.getMessage() + "\"}";
+                sendResponse(t, errorResponse);
+            }
+
         } else {
             System.out.println("    No query parameter found");
+            String errorResponse = "{\"status\":\"error\",\"errorType\":\"bad_data\",\"error\":\"missing query parameter\"}";
+            sendResponse(t, errorResponse);
         }
     }
+
+    public static String convertPromToSQL(String promQuery) {
+
+        PromQLNode root = new PromQLParser().parse(promQuery);
+        String sql = visitRoot(root);
+
+        return sql + ";";
+    }
+
+    public static AbstractSQLSubQuery averageQuery(AbstractSQLSubQuery subQuery, MetricNode metricNode)
+    {
+        return new AverageSQLSubquery(subQuery, metricNode.getRangeDuration());
+
+
+    }
+
+
+    private static String visitRoot(PromQLNode node) {
+
+
+        if(node instanceof  FunctionNode) {
+            FunctionNode fn = (FunctionNode) node;
+
+            String functionName = fn.getFunctionName();
+
+
+            List<PromQLNode> args = fn.getArgs();
+
+            if(args.size() !=1) {
+                return "-- Unsupported PromQL function with "+args.size()+" args: " + functionName;
+            }
+
+            if(!(args.get(0) instanceof MetricNode)) {
+                return "-- Unsupported PromQL function arg type: " + args.get(0);
+            }
+
+            MetricNode metricNode = (MetricNode) args.get(0);
+
+
+            AbstractSQLSubQuery  sqlSubQuery= convertMetricToSQL(metricNode);
+
+            if(functionName.equals("avg_over_time")){
+                return averageQuery(sqlSubQuery,metricNode).toString();
+            }
+
+
+
+            StringBuilder builder = new StringBuilder();
+
+            builder.append("-- Function: ").append(functionName).append("\n");
+
+
+            for(PromQLNode arg : fn.getArgs()) {
+                builder.append("-- Arg: \n");
+                builder.append(visitRoot(arg)).append("\n");
+            }
+
+            return builder.toString();
+
+
+        }else if(node instanceof MetricNode){
+
+            AbstractSQLSubQuery  sqlSubQuery= convertMetricToSQL((MetricNode) node);
+            return sqlSubQuery.toString();
+        } else if (node instanceof StringLiteralNode ) {
+            return "String Literal: " + ((StringLiteralNode) node).getValue();
+        } else if (node instanceof ScalarNode) {
+            return "Scalar Literal: " + ((ScalarNode) node).getValue();
+        }
+
+
+        return "-- Unsupported PromQL node: " + node;
+    }
+
+    public static AbstractSQLSubQuery convertMetricToSQL(MetricNode metricNode) {
+
+        if(metricNode.getLabels().isEmpty()) {
+
+            return new CollectionSQLSubQuery(metricNode.getMetricName());
+
+        }
+
+
+        return null;
+
+
+
+
+    }
+
+
+//    SELECT
+//            timestamp ,
+//    `value`,
+//    AVG(`value`) OVER (
+//    PARTITION BY symbol
+//    ORDER BY timestamp
+//    RANGE BETWEEN 3600000 PRECEDING
+//    AND CURRENT ROW
+//    ) AS avg_1h
+//    FROM stock_market_price_usd
+//    ORDER BY timestamp;
+
+
+
 
     private static Map<String, String> parseQueryParams(String query) {
         if (query == null) return Map.of();
@@ -216,4 +332,310 @@ public class PromServer {
             os.write(bytes);
         }
     }
+
+    private static String executeQuery(String sql) throws IOException, InterruptedException {
+        if ("asterixdb".equalsIgnoreCase(BACKEND_TYPE)) {
+            return executeAsterixDBQuery(sql);
+        } else {
+            return executeCouchbaseQuery(sql);
+        }
+    }
+
+    private static String executeCouchbaseQuery(String sql) throws IOException, InterruptedException {
+        // Escape quotes and backslashes in SQL for JSON
+        String escapedSql = sql.replace("\\", "\\\\").replace("\"", "\\\"");
+        
+        String jsonBody = """
+            {
+               "statement": "%s",
+                "pretty": true,
+                "client_context_id": "xyz"
+            }
+            """.formatted(escapedSql);
+
+        HttpClient client = HttpClient.newHttpClient();
+        HttpRequest.Builder requestBuilder = HttpRequest.newBuilder()
+            .uri(URI.create(BACKEND_URI))
+            .header("Content-Type", "application/json")
+            .POST(HttpRequest.BodyPublishers.ofString(jsonBody));
+
+        if (BACKEND_USER != null && !BACKEND_USER.isEmpty()) {
+             requestBuilder.header("Authorization", "Basic " + Base64.getEncoder().encodeToString((BACKEND_USER + ":" + BACKEND_PASSWORD).getBytes(StandardCharsets.UTF_8)));
+        }
+
+        HttpRequest request = requestBuilder.build();
+
+        HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
+        
+        if (response.statusCode() != 200) {
+            throw new IOException("Couchbase query failed: HTTP " + response.statusCode() + " " + response.body());
+        }
+        
+        return response.body();
+    }
+
+    private static String executeAsterixDBQuery(String sql) throws IOException, InterruptedException {
+        String escapedSql = sql.replace("\\", "\\\\").replace("\"", "\\\"");
+        
+        String jsonBody = """
+            {
+               "statement": "%s",
+                "pretty": true
+            }
+            """.formatted(escapedSql);
+
+        HttpClient client = HttpClient.newHttpClient();
+        HttpRequest request = HttpRequest.newBuilder()
+            .uri(URI.create(BACKEND_URI))
+            .header("Content-Type", "application/json")
+            .POST(HttpRequest.BodyPublishers.ofString(jsonBody))
+            .build();
+
+        HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
+        
+        if (response.statusCode() != 200) {
+            throw new IOException("AsterixDB query failed: HTTP " + response.statusCode() + " " + response.body());
+        }
+        
+        return response.body();
+    }
+
+    private static String transformToPromResponse(String couchbaseJson, String resultType) {
+        // Extract results array
+        Pattern resultsPattern = Pattern.compile("\"results\"\\s*:\\s*\\[(.*?)\\]", Pattern.DOTALL);
+        Matcher resultsMatcher = resultsPattern.matcher(couchbaseJson);
+        
+        StringBuilder resultBuilder = new StringBuilder();
+        resultBuilder.append("[");
+        
+        if (resultsMatcher.find()) {
+            String resultsContent = resultsMatcher.group(1);
+            if (!resultsContent.trim().isEmpty()) {
+                List<String> rows = extractJsonObjects(resultsContent);
+                
+                // Group by metric labels
+                Map<Map<String, String>, List<Map<String, Object>>> groupedSeries = new HashMap<>();
+
+                for (String row : rows) {
+                    Map<String, String> fields = extractFields(row);
+                    
+                    // Identify timestamp, value, and labels
+                    String timestampStr = null;
+                    String valueStr = null;
+                    Map<String, String> labels = new HashMap<>();
+                    
+                    for (Map.Entry<String, String> entry : fields.entrySet()) {
+                        String key = entry.getKey();
+                        String val = entry.getValue();
+                        
+                        // Handle nested object if "SELECT *" (key is bucket name)
+                        if (val.trim().startsWith("{")) {
+                            Map<String, String> innerFields = extractFields(val);
+                            for (Map.Entry<String, String> inner : innerFields.entrySet()) {
+                                String innerKey = inner.getKey();
+                                String innerVal = inner.getValue();
+                                if (isTimestamp(innerKey)) timestampStr = innerVal;
+                                else if (isValue(innerKey)) valueStr = innerVal;
+                                else labels.put(innerKey, innerVal.replace("\"", ""));
+                            }
+                             labels.put("__name__", key);
+                        } else {
+                            if (isTimestamp(key)) timestampStr = val;
+                            else if (isValue(key)) valueStr = val;
+                            else labels.put(key, val.replace("\"", ""));
+                        }
+                    }
+                    
+                    if (timestampStr == null) timestampStr = String.valueOf(Instant.now().getEpochSecond());
+                    if (valueStr == null) valueStr = "0";
+
+                    double ts = 0;
+                    try {
+                        String cleanTs = timestampStr.replace("\"", "");
+                        if (cleanTs.contains("-")) {
+                             ts = Instant.parse(cleanTs).getEpochSecond();
+                        } else {
+                            ts = Double.parseDouble(cleanTs);
+                            if (ts > 100000000000L) ts /= 1000.0;
+                        }
+                    } catch (Exception e) {
+                        ts = Instant.now().getEpochSecond();
+                    }
+                    
+                    String cleanVal = valueStr.replace("\"", "");
+
+                    // Add to group
+                    groupedSeries.computeIfAbsent(labels, k -> new ArrayList<>())
+                        .add(Map.of("ts", ts, "val", cleanVal));
+                }
+
+                // Build JSON from groups
+                boolean firstGroup = true;
+                for (Map.Entry<Map<String, String>, List<Map<String, Object>>> entry : groupedSeries.entrySet()) {
+                    if (!firstGroup) resultBuilder.append(",");
+                    firstGroup = false;
+
+                    Map<String, String> labels = entry.getKey();
+                    List<Map<String, Object>> values = entry.getValue();
+                    
+                    // Sort values by timestamp
+                    values.sort((a, b) -> Double.compare((Double) a.get("ts"), (Double) b.get("ts")));
+
+                    StringBuilder metricBuilder = new StringBuilder();
+                    metricBuilder.append("{");
+                    metricBuilder.append("\"metric\":{");
+                    boolean firstLabel = true;
+                    for (Map.Entry<String, String> label : labels.entrySet()) {
+                        if (!firstLabel) metricBuilder.append(",");
+                        metricBuilder.append("\"").append(label.getKey()).append("\":\"").append(label.getValue()).append("\"");
+                        firstLabel = false;
+                    }
+                    metricBuilder.append("},");
+                    
+                    if ("matrix".equals(resultType)) {
+                        metricBuilder.append("\"values\":[");
+                        boolean firstVal = true;
+                        for (Map<String, Object> point : values) {
+                            if (!firstVal) metricBuilder.append(",");
+                            firstVal = false;
+                            metricBuilder.append("[").append(point.get("ts")).append(",\"").append(point.get("val")).append("\"]");
+                        }
+                        metricBuilder.append("]");
+                    } else {
+                        // For vector, just take the last value (most recent)
+                        if (!values.isEmpty()) {
+                            Map<String, Object> point = values.get(values.size() - 1);
+                            metricBuilder.append("\"value\":[")
+                                .append(point.get("ts")).append(",\"").append(point.get("val")).append("\"]");
+                        }
+                    }
+                    metricBuilder.append("}");
+                    
+                    resultBuilder.append(metricBuilder);
+                }
+            }
+        }
+        
+        resultBuilder.append("]");
+        
+        return """
+            {
+                "status": "success",
+                "data": {
+                    "resultType": "%s",
+                    "result": %s
+                }
+            }
+            """.formatted(resultType, resultBuilder.toString());
+    }
+
+    private static boolean isTimestamp(String key) {
+        return key.equalsIgnoreCase("timestamp") || key.equalsIgnoreCase("time") || key.equalsIgnoreCase("t");
+    }
+
+    private static boolean isValue(String key) {
+        return key.equalsIgnoreCase("value") || key.equalsIgnoreCase("v") || key.equalsIgnoreCase("val");
+    }
+
+    private static List<String> extractJsonObjects(String jsonArrayContent) {
+        List<String> objects = new java.util.ArrayList<>();
+        int depth = 0;
+        int start = -1;
+        boolean inQuote = false;
+        
+        for (int i = 0; i < jsonArrayContent.length(); i++) {
+            char c = jsonArrayContent.charAt(i);
+            
+            if (c == '"' && (i == 0 || jsonArrayContent.charAt(i - 1) != '\\')) {
+                inQuote = !inQuote;
+            }
+            
+            if (!inQuote) {
+                if (c == '{') {
+                    if (depth == 0) start = i;
+                    depth++;
+                } else if (c == '}') {
+                    depth--;
+                    if (depth == 0 && start != -1) {
+                        objects.add(jsonArrayContent.substring(start, i + 1));
+                        start = -1;
+                    }
+                }
+            }
+        }
+        return objects;
+    }
+
+    private static Map<String, String> extractFields(String jsonObject) {
+        Map<String, String> fields = new HashMap<>();
+        String content = jsonObject.trim();
+        if (content.startsWith("{")) content = content.substring(1);
+        if (content.endsWith("}")) content = content.substring(0, content.length() - 1);
+        
+        int i = 0;
+        int len = content.length();
+        while (i < len) {
+            int keyStart = content.indexOf("\"", i);
+            if (keyStart == -1) break;
+            int keyEnd = content.indexOf("\"", keyStart + 1);
+            if (keyEnd == -1) break;
+            String key = content.substring(keyStart + 1, keyEnd);
+            
+            i = content.indexOf(":", keyEnd);
+            if (i == -1) break;
+            i++; 
+            
+            while (i < len && Character.isWhitespace(content.charAt(i))) i++;
+            
+            int valStart = i;
+            int valEnd = -1;
+            
+            if (i < len && content.charAt(i) == '{') {
+                int depth = 0;
+                for (int j = i; j < len; j++) {
+                    char c = content.charAt(j);
+                    if (c == '{') depth++;
+                    else if (c == '}') {
+                        depth--;
+                        if (depth == 0) {
+                            valEnd = j + 1;
+                            break;
+                        }
+                    }
+                }
+            } else if (i < len && content.charAt(i) == '"') {
+                for (int j = i + 1; j < len; j++) {
+                    if (content.charAt(j) == '"' && content.charAt(j - 1) != '\\') {
+                        valEnd = j + 1;
+                        break;
+                    }
+                }
+            } else {
+                for (int j = i; j < len; j++) {
+                    char c = content.charAt(j);
+                    if (c == ',' || c == '}') {
+                        valEnd = j;
+                        break;
+                    }
+                }
+                if (valEnd == -1) valEnd = len;
+            }
+            
+            if (valEnd != -1) {
+                String val = content.substring(valStart, valEnd).trim();
+                fields.put(key, val);
+                i = valEnd;
+                while (i < len && (Character.isWhitespace(content.charAt(i)) || content.charAt(i) == ',')) i++;
+            } else {
+                break;
+            }
+        }
+        return fields;
+    }
+
+
+
+
+
+
 }
