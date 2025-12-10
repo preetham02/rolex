@@ -13,7 +13,7 @@ public class SelectSQLSubQuery extends AbstractSQLSubQuery{
 
     @Override
     public String toString() {
-        return "SELECT * FROM (" + innerSubquery.toString() + ")"
+        return "SELECT sub.* FROM (" + innerSubquery.toString() + ") sub"
                 + " WHERE " + String.join(" AND ", selectedColumns.stream().map(WhereCondition::toString).toArray(String[]::new));
     }
 

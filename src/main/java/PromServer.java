@@ -4,6 +4,7 @@ import com.sun.net.httpserver.HttpServer;
 
 import java.io.FileInputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.URI;
@@ -80,9 +81,31 @@ public class PromServer {
     private static void processQuery(HttpExchange t, String resultType) throws IOException {
         URI requestURI = t.getRequestURI();
         String rawQuery = requestURI.getRawQuery();
-        Map<String, String> params = parseQueryParams(rawQuery);
+        Map<String, String> params = new HashMap<>();
+        if (rawQuery != null) {
+            params.putAll(parseQueryParams(rawQuery));
+        }
+        
+        // Handle POST body parameters
+        if ("POST".equalsIgnoreCase(t.getRequestMethod())) {
+            try (InputStream is = t.getRequestBody()) {
+                String body = new String(is.readAllBytes(), StandardCharsets.UTF_8);
+                if (!body.isEmpty()) {
+                    Map<String, String> bodyParams = parseQueryParams(body);
+                    params.putAll(bodyParams);
+                }
+            }
+        }
         
         String promQuery = params.get("query");
+        String start = params.get("start");
+        String end = params.get("end");
+        String step = params.get("step");
+        
+        Long startTs = parseTimestamp(start);
+        Long endTs = parseTimestamp(end);
+        Long stepDuration = parseStep(step);
+
         String timestamp = DateTimeFormatter.ISO_INSTANT.format(Instant.now());
         
         System.out.printf("[%s] Method: %s, Path: %s%n", 
@@ -90,8 +113,11 @@ public class PromServer {
             
         if (promQuery != null) {
             System.out.println("    PromQL: " + promQuery);
+            if (start != null) System.out.println("    Start:  " + start + " -> " + startTs);
+            if (end != null)   System.out.println("    End:    " + end + " -> " + endTs);
+            if (step != null)  System.out.println("    Step:   " + step + " -> " + stepDuration);
 
-            String sql = convertPromToSQL(promQuery);
+            String sql = convertPromToSQL(promQuery, startTs, endTs, stepDuration);
             System.out.println("    SQL:    " + sql);
 
             try {
@@ -111,12 +137,55 @@ public class PromServer {
         }
     }
 
-    public static String convertPromToSQL(String promQuery) {
+    private static Long parseTimestamp(String ts) {
+        if (ts == null) return null;
+        try {
+            // Try parsing as double (unix timestamp in seconds)
+            return (long) (Double.parseDouble(ts) * 1000);
+        } catch (NumberFormatException e) {
+            // Try parsing as ISO 8601
+            try {
+                return Instant.parse(ts).toEpochMilli();
+            } catch (Exception ex) {
+                return null;
+            }
+        }
+    }
+
+    private static Long parseStep(String step) {
+        if (step == null) return null;
+        try {
+             // Try parsing as seconds (float)
+             return (long) (Double.parseDouble(step) * 1000);
+        } catch (NumberFormatException e) {
+             // Parse duration string (e.g. "1m", "5s")
+             return AverageSQLSubquery.parseDuration(step); 
+        }
+    }
+
+    public static String convertPromToSQL(String promQuery, Long startTs, Long endTs, Long stepDuration) {
 
         PromQLNode root = new PromQLParser().parse(promQuery);
-        String sql = visitRoot(root);
+        AbstractSQLSubQuery sqlSubQuery = visitRoot(root, startTs, endTs, stepDuration);
 
-        return sql + ";";
+        if(startTs == null || endTs == null || stepDuration == null) {
+            return sqlSubQuery + ";";
+        }
+
+
+        SelectSQLSubQuery sqlSubQuery1 = new SelectSQLSubQuery(
+                List.of(
+                        new SelectSQLSubQuery.WhereCondition("timestamp", ">=", String.valueOf(startTs)),
+                        new SelectSQLSubQuery.WhereCondition("timestamp", "<=", String.valueOf(endTs)),
+                        new SelectSQLSubQuery.WhereCondition( String.format(" ( timestamp - %s) %% %s ",startTs, stepDuration) , "=", "0")
+
+                ),
+                sqlSubQuery
+        );
+
+
+        return sqlSubQuery1 + ";";
+
     }
 
     public static AbstractSQLSubQuery averageQuery(AbstractSQLSubQuery subQuery, MetricNode metricNode)
@@ -127,32 +196,36 @@ public class PromServer {
     }
 
 
-    private static String visitRoot(PromQLNode node) {
+    public static AbstractSQLSubQuery maxQuery(AbstractSQLSubQuery subQuery, MetricNode metricNode)
+    {
+        return new MaxSQLSubQuery(subQuery, metricNode.getRangeDuration());
+    }
+
+
+    private static AbstractSQLSubQuery visitRoot(PromQLNode node, Long startTs, Long endTs, Long stepDuration) {
 
 
         if(node instanceof  FunctionNode) {
             FunctionNode fn = (FunctionNode) node;
-
             String functionName = fn.getFunctionName();
-
-
             List<PromQLNode> args = fn.getArgs();
-
             if(args.size() !=1) {
-                return "-- Unsupported PromQL function with "+args.size()+" args: " + functionName;
+                return DummySQLSubquery.INSTANCE;
             }
 
             if(!(args.get(0) instanceof MetricNode)) {
-                return "-- Unsupported PromQL function arg type: " + args.get(0);
+                return DummySQLSubquery.INSTANCE;
             }
 
             MetricNode metricNode = (MetricNode) args.get(0);
 
 
-            AbstractSQLSubQuery  sqlSubQuery= convertMetricToSQL(metricNode);
+            AbstractSQLSubQuery  sqlSubQuery= convertMetricToSQL(metricNode,startTs,endTs,stepDuration);
 
             if(functionName.equals("avg_over_time")){
-                return averageQuery(sqlSubQuery,metricNode).toString();
+                return averageQuery(sqlSubQuery,metricNode);
+            }else if(functionName.equals("max_over_time")){
+                return maxQuery(sqlSubQuery,metricNode);
             }
 
 
@@ -164,31 +237,46 @@ public class PromServer {
 
             for(PromQLNode arg : fn.getArgs()) {
                 builder.append("-- Arg: \n");
-                builder.append(visitRoot(arg)).append("\n");
+                builder.append(visitRoot(arg,startTs,endTs,startTs)).append("\n");
             }
 
-            return builder.toString();
+            return DummySQLSubquery.INSTANCE;
 
 
         }else if(node instanceof MetricNode){
 
-            AbstractSQLSubQuery  sqlSubQuery= convertMetricToSQL((MetricNode) node);
-            return sqlSubQuery.toString();
+            AbstractSQLSubQuery  sqlSubQuery= convertMetricToSQL((MetricNode) node,startTs,endTs,stepDuration);
+            return sqlSubQuery;
         } else if (node instanceof StringLiteralNode ) {
-            return "String Literal: " + ((StringLiteralNode) node).getValue();
+            return DummySQLSubquery.INSTANCE;
         } else if (node instanceof ScalarNode) {
-            return "Scalar Literal: " + ((ScalarNode) node).getValue();
+            return DummySQLSubquery.INSTANCE;
         }
 
 
-        return "-- Unsupported PromQL node: " + node;
+        return DummySQLSubquery.INSTANCE;
     }
 
-    public static AbstractSQLSubQuery convertMetricToSQL(MetricNode metricNode) {
+    public static AbstractSQLSubQuery convertMetricToSQL(MetricNode metricNode, Long startTs, Long endTs, Long stepDuration) {
 
         if(metricNode.getLabels().isEmpty()) {
 
-            return new CollectionSQLSubQuery(metricNode.getMetricName());
+            CollectionSQLSubQuery subQuery = new CollectionSQLSubQuery(metricNode.getMetricName());
+
+
+            if(startTs == null || endTs == null || stepDuration == null) {
+                return subQuery;
+            }
+
+
+            return new SelectSQLSubQuery(
+                    List.of(
+                            new SelectSQLSubQuery.WhereCondition("timestamp", ">=", String.valueOf(startTs- stepDuration)),
+                            new SelectSQLSubQuery.WhereCondition("timestamp", "<=", String.valueOf(endTs))
+                    ),
+                   subQuery
+            );
+
 
         }
 
