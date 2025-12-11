@@ -1,0 +1,136 @@
+options {
+  STATIC = false;
+  IGNORE_CASE = true;
+}
+
+PARSER_BEGIN(GroupPromQLParser)
+import java.io.*;
+import java.util.*;
+import ast.*;
+
+public class GroupPromQLParser {
+    public static GroupInstantVector parseGroupInstant(String query) throws ParseException {
+        if (query == null || query.trim().isEmpty()) return null;
+        GroupPromQLParser parser = new GroupPromQLParser(new StringReader(query));
+        return parser.Start();
+    }
+
+    private boolean isAggOverTime(String s) {
+        return s.equalsIgnoreCase("sum_over_time") || 
+               s.equalsIgnoreCase("count_over_time") || 
+               s.equalsIgnoreCase("min_over_time") || 
+               s.equalsIgnoreCase("max_over_time") || 
+               s.equalsIgnoreCase("avg_over_time") || 
+               s.equalsIgnoreCase("stddev_samp_over_time");
+    }
+
+    private boolean isAggBy(String s) {
+        return s.equalsIgnoreCase("sum_by") || 
+               s.equalsIgnoreCase("count_by") || 
+               s.equalsIgnoreCase("min_by") || 
+               s.equalsIgnoreCase("max_by") || 
+               s.equalsIgnoreCase("avg_by") || 
+               s.equalsIgnoreCase("stddev_samp_by");
+    }
+
+    private String getAggName(String s) {
+        if (s.toLowerCase().endsWith("_by")) {
+            return s.substring(0, s.length() - 3);
+        }
+        return s;
+    }
+}
+PARSER_END(GroupPromQLParser)
+
+SKIP : { " " | "\t" | "\n" | "\r" }
+
+TOKEN : {
+    < LBRACE: "{" >
+  | < RBRACE: "}" >
+  | < LBRACKET: "[" >
+  | < RBRACKET: "]" >
+  | < LPAREN: "(" >
+  | < RPAREN: ")" >
+  | < COMMA: "," >
+  | < EQUALS: "=" >
+  | < NUMBER: (["0"-"9"])+ ("." (["0"-"9"])+)? >
+  | < STRING: "\"" (~["\"","\\"] | "\\" ~[])* "\"" | "'" (~["'","\\"] | "\\" ~[])* "'" >
+  | < DURATION: (["0"-"9"])+ ["s","m","h","d","w","y"] >
+  | < IDENTIFIER: ["a"-"z","A"-"Z","_"] (["a"-"z","A"-"Z","0"-"9","_"])* >
+}
+
+GroupInstantVector Start() :
+{ GroupInstantVector node; }
+{
+  node = GroupInstant() <EOF>
+  { return node; }
+}
+
+GroupInstantVector GroupInstant() :
+{ GroupInstantVector node; Token t; }
+{
+  (
+    LOOKAHEAD(<IDENTIFIER> <LPAREN>, { isAggBy(getToken(1).image) }) node = AggByClause()
+    | LOOKAHEAD(<IDENTIFIER> <LPAREN>, { isAggOverTime(getToken(1).image) }) node = AggOverTime()
+    | node = MetricSelector()
+  )
+  { return node; }
+}
+
+GroupInstantVector MetricSelector() :
+{ Token name; Map<String,String> filters = new HashMap<String,String>(); }
+{
+  name = <IDENTIFIER>
+  ( <LBRACE> FilterList(filters) <RBRACE> )?
+  { return new GroupMetricSelector(name.image, filters); }
+}
+
+void FilterList(Map<String,String> filters) :
+{ Token k, v; }
+{
+  k = <IDENTIFIER> <EQUALS> v = <STRING>
+  { filters.put(k.image, v.image.substring(1, v.image.length()-1)); }
+  ( <COMMA> k = <IDENTIFIER> <EQUALS> v = <STRING> { filters.put(k.image, v.image.substring(1, v.image.length()-1)); } )*
+}
+
+GroupInstantVector AggByClause() :
+{ List<String> cols = new ArrayList<String>(); GroupInstantVector body; Token t; String aggName; }
+{
+    t = <IDENTIFIER>
+    {
+        if (!isAggBy(t.image)) {
+             throw new ParseException("Expected agg_by function (sum_by, count_by, avg_by), found: " + t.image);
+        }
+        aggName = getAggName(t.image);
+    }
+    <LPAREN> ColumnList(cols) <RPAREN> <LPAREN> body = GroupInstant() <RPAREN>
+    { return new AggBy(aggName, cols, body); }
+}
+
+void ColumnList(List<String> cols) :
+{ Token t; }
+{
+    t = <IDENTIFIER> { cols.add(t.image); }
+    ( <COMMA> t = <IDENTIFIER> { cols.add(t.image); } )*
+}
+
+GroupInstantVector AggOverTime() :
+{ Token funcName; GroupRangeVector range; }
+{
+    funcName=<IDENTIFIER>
+    {
+       if (!isAggOverTime(funcName.image)) {
+           throw new ParseException("Expected agg_over_time function, found: " + funcName.image);
+       }
+    }
+    <LPAREN> range = GroupRange() <RPAREN>
+    { return new GroupAggOverTime(funcName.image, range); }
+}
+
+GroupRangeVector GroupRange() :
+{ GroupInstantVector vec; Token dur; }
+{
+    vec = GroupInstant() <LBRACKET> dur = <DURATION> <RBRACKET>
+    { return new GroupRangeVector(vec, dur.image); }
+}
+

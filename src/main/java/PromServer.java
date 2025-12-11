@@ -1,3 +1,4 @@
+import ast.InstantVector;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
@@ -67,18 +68,26 @@ public class PromServer {
     static class QueryHandler implements HttpHandler {
         @Override
         public void handle(HttpExchange t) throws IOException {
-            processQuery(t, "vector");
+            try {
+                processQuery(t, "vector");
+            } catch (ParseException e) {
+                throw new RuntimeException(e);
+            }
         }
     }
 
     static class QueryRangeHandler implements HttpHandler {
         @Override
         public void handle(HttpExchange t) throws IOException {
-            processQuery(t, "matrix");
+            try {
+                processQuery(t, "matrix");
+            } catch (ParseException e) {
+                throw new RuntimeException(e);
+            }
         }
     }
 
-    private static void processQuery(HttpExchange t, String resultType) throws IOException {
+    private static void processQuery(HttpExchange t, String resultType) throws IOException, ParseException {
         URI requestURI = t.getRequestURI();
         String rawQuery = requestURI.getRawQuery();
         Map<String, String> params = new HashMap<>();
@@ -163,28 +172,37 @@ public class PromServer {
         }
     }
 
-    public static String convertPromToSQL(String promQuery, Long startTs, Long endTs, Long stepDuration) {
-
-        PromQLNode root = new PromQLParser().parse(promQuery);
-        AbstractSQLSubQuery sqlSubQuery = visitRoot(root, startTs, endTs, stepDuration);
-
-        if(startTs == null || endTs == null || stepDuration == null) {
-            return sqlSubQuery + ";";
-        }
+    public static String convertPromToSQL(String promQuery, Long startTs, Long endTs, Long stepDuration) throws ParseException {
 
 
-        SelectSQLSubQuery sqlSubQuery1 = new SelectSQLSubQuery(
-                List.of(
-                        new SelectSQLSubQuery.WhereCondition("timestamp", ">=", String.valueOf(startTs)),
-                        new SelectSQLSubQuery.WhereCondition("timestamp", "<=", String.valueOf(endTs)),
-                        new SelectSQLSubQuery.WhereCondition( String.format(" ( timestamp - %s) %% %s ",startTs, stepDuration) , "=", "0")
+       InstantVector instantVector = GeneratedPromQLParser.parseInstantVector(promQuery);
 
-                ),
-                sqlSubQuery
-        );
+      AbstractSQLSubQuery sqlSubQuery= PromQLCompiler.compileAndOptimizeInstantVector(instantVector, startTs, endTs, stepDuration);
+
+        return sqlSubQuery + ";";
 
 
-        return sqlSubQuery1 + ";";
+
+//        PromQLNode root = new PromQLParser().parse(promQuery);
+//        AbstractSQLSubQuery sqlSubQuery = visitRoot(root, startTs, endTs, stepDuration);
+//
+//        if(startTs == null || endTs == null || stepDuration == null) {
+//            return sqlSubQuery + ";";
+//        }
+//
+//
+//        SelectSQLSubQuery sqlSubQuery1 = new SelectSQLSubQuery(
+//                List.of(
+//                        new SelectSQLSubQuery.WhereCondition("timestamp", ">=", String.valueOf(startTs)),
+//                        new SelectSQLSubQuery.WhereCondition("timestamp", "<=", String.valueOf(endTs)),
+//                        new SelectSQLSubQuery.WhereCondition( String.format(" ( timestamp - %s) %% %s ",startTs, stepDuration) , "=", "0")
+//
+//                ),
+//                sqlSubQuery
+//        );
+//
+//
+//        return sqlSubQuery1 + ";";
 
     }
 

@@ -1,0 +1,205 @@
+options {
+  STATIC = false;
+  IGNORE_CASE = true;
+}
+
+PARSER_BEGIN(GeneratedPromQLParser)
+import java.io.*;
+import java.util.*;
+import ast.*;
+
+public class GeneratedPromQLParser {
+    public static InstantVector parseInstantVector(String query) throws ParseException {
+        if (query == null || query.trim().isEmpty()) return null;
+        GeneratedPromQLParser parser = new GeneratedPromQLParser(new StringReader(query));
+        return parser.StartInstant();
+    }
+
+    public static RangeVector parseRangeVector(String query) throws ParseException {
+        if (query == null || query.trim().isEmpty()) return null;
+        GeneratedPromQLParser parser = new GeneratedPromQLParser(new StringReader(query));
+        return parser.StartRange();
+    }
+
+    private boolean isAgg(String s) {
+        return s.equalsIgnoreCase("sum") || 
+               s.equalsIgnoreCase("count") || 
+               s.equalsIgnoreCase("min") || 
+               s.equalsIgnoreCase("max") || 
+               s.equalsIgnoreCase("avg") || 
+               s.equalsIgnoreCase("stddev_samp");
+    }
+
+    private boolean isSingular(String s) {
+        return s.equalsIgnoreCase("abs") || 
+               s.equalsIgnoreCase("acos") ||
+               s.equalsIgnoreCase("asin") ||
+               s.equalsIgnoreCase("atan") ||
+               s.equalsIgnoreCase("atan2") ||
+               s.equalsIgnoreCase("ceil") ||
+               s.equalsIgnoreCase("cos") ||
+               s.equalsIgnoreCase("cosh") ||
+               s.equalsIgnoreCase("degrees") ||
+               s.equalsIgnoreCase("e") ||
+               s.equalsIgnoreCase("exp") ||
+               s.equalsIgnoreCase("floor") ||
+               s.equalsIgnoreCase("ln") ||
+               s.equalsIgnoreCase("log") ||
+               s.equalsIgnoreCase("pi") ||
+               s.equalsIgnoreCase("power") ||
+               s.equalsIgnoreCase("radians") ||
+               s.equalsIgnoreCase("round") ||
+               s.equalsIgnoreCase("sign") ||
+               s.equalsIgnoreCase("sin") ||
+               s.equalsIgnoreCase("sinh") ||
+               s.equalsIgnoreCase("sqrt") ||
+               s.equalsIgnoreCase("tan") ||
+               s.equalsIgnoreCase("tanh") ||
+               s.equalsIgnoreCase("trunc");
+    }
+    
+    private boolean isAggOverTime(String s) {
+        return s.equalsIgnoreCase("sum_over_time") || 
+               s.equalsIgnoreCase("count_over_time") || 
+               s.equalsIgnoreCase("min_over_time") || 
+               s.equalsIgnoreCase("max_over_time") || 
+               s.equalsIgnoreCase("avg_over_time") || 
+               s.equalsIgnoreCase("stddev_samp_over_time");
+    }
+}
+PARSER_END(GeneratedPromQLParser)
+
+SKIP : { " " | "\t" | "\n" | "\r" }
+
+TOKEN : {
+    < PLUS: "+" >
+  | < MINUS: "-" >
+  | < MULT: "*" >
+  | < DIV: "/" >
+  | < LBRACE: "{" >
+  | < RBRACE: "}" >
+  | < LBRACKET: "[" >
+  | < RBRACKET: "]" >
+  | < LPAREN: "(" >
+  | < RPAREN: ")" >
+  | < COMMA: "," >
+  | < EQUALS: "=" >
+  | < NUMBER: (["0"-"9"])+ ("." (["0"-"9"])+)? >
+  | < STRING: "\"" (~["\"","\\"] | "\\" ~[])* "\"" | "'" (~["'","\\"] | "\\" ~[])* "'" >
+  | < DURATION: (["0"-"9"])+ ["s","m","h","d","w","y"] >
+  | < IDENTIFIER: ["a"-"z","A"-"Z","_"] (["a"-"z","A"-"Z","0"-"9","_"])* >
+}
+
+InstantVector StartInstant() :
+{ InstantVector node; }
+{
+  node = Expression() <EOF>
+  { return node; }
+}
+
+RangeVector StartRange() :
+{ RangeVector node; }
+{
+  node = RangeVector() <EOF>
+  { return node; }
+}
+
+InstantVector Expression() :
+{ InstantVector left; Node right; Token op; }
+{
+  left = Term()
+  (
+    ( op=<PLUS> | op=<MINUS> | op=<MULT> | op=<DIV> )
+    (
+      LOOKAHEAD(Term()) right = Term()
+      | right = Scalar()
+    )
+    { left = new BinaryOp(left, op.image, right); }
+  )*
+  { return left; }
+}
+
+InstantVector Term() :
+{ InstantVector node; }
+{
+  (
+    LOOKAHEAD(<IDENTIFIER> <LPAREN>) node = FunctionCall()
+    | node = MetricSelector()
+    | <LPAREN> node = Expression() <RPAREN>
+  )
+  { return node; }
+}
+
+InstantVector MetricSelector() :
+{ Token name; Map<String,String> filters = new HashMap<String,String>(); }
+{
+  name = <IDENTIFIER>
+  ( <LBRACE> FilterList(filters) <RBRACE> )?
+  { return new MetricSelector(name.image, filters); }
+}
+
+RangeVector RangeVector() :
+{ InstantVector vec; Token duration; }
+{
+    vec = Term()
+    <LBRACKET> duration = <DURATION> <RBRACKET>
+    { return new RangeVector(vec, duration.image); }
+}
+
+void FilterList(Map<String,String> filters) :
+{ Token k, v; }
+{
+  k = <IDENTIFIER> <EQUALS> v = <STRING>
+  { filters.put(k.image, v.image.substring(1, v.image.length()-1)); }
+  ( <COMMA> k = <IDENTIFIER> <EQUALS> v = <STRING> { filters.put(k.image, v.image.substring(1, v.image.length()-1)); } )*
+}
+
+InstantVector FunctionCall() :
+{ Token funcName; Node arg; }
+{
+    funcName=<IDENTIFIER>
+    {
+       if (!isSingular(funcName.image) && !isAggOverTime(funcName.image)) {
+           throw new ParseException("Expected singular function or agg_over_time in instant_vector, found: " + funcName.image);
+       }
+    }
+    <LPAREN>
+    (
+       {
+           if (isAggOverTime(funcName.image)) {
+               arg = RangeVector();
+           } else {
+               arg = Expression();
+           }
+       }
+    )
+    <RPAREN>
+    { 
+        if (arg instanceof RangeVector) {
+            return new AggOverTime(funcName.image, (RangeVector)arg);
+        } else {
+            return new SingularFunction(funcName.image, (InstantVector)arg);
+        }
+    }
+}
+
+Scalar Scalar() :
+{ Token num; Scalar node; }
+{
+    num = <NUMBER> { return new NumberLiteral(Double.parseDouble(num.image)); }
+    | node = AggScalar() { return node; }
+}
+
+Scalar AggScalar() :
+{ Token funcName; InstantVector arg; }
+{
+    funcName=<IDENTIFIER>
+    {
+        if (!isAgg(funcName.image)) {
+             throw new ParseException("Expected aggregation function in scalar context, found: " + funcName.image);
+        }
+    }
+    <LPAREN> arg = Expression() <RPAREN>
+    { return new Aggregation(funcName.image, arg); }
+}
+
