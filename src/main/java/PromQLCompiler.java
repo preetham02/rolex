@@ -1,12 +1,16 @@
+import ast.AggBy;
 import ast.AggOverTime;
 import ast.Aggregation;
 import ast.BinaryOp;
+import ast.GroupAggOverTime;
+import ast.GroupInstantVector;
 import ast.InstantVector;
 import ast.MetricSelector;
 import ast.NumberLiteral;
 import ast.RangeVector;
 import ast.Scalar;
 import ast.SingularFunction;
+import ast.GroupBy;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -19,6 +23,34 @@ public class PromQLCompiler {
         AbstractSQLSubQuery query=discardUnnecessaryTuples(subquery,startTime,endTime,step);
         return query;
     }
+
+    public static AbstractGroupSubQuery compileAndOptimizeGroupInstantVector(ast.GroupInstantVector vector, Long startTime, Long endTime, Long step) {
+        AbstractGroupSubQuery subquery = compileGroupInstantVector(vector);
+//        pushDownTimeRangeFilter(subquery, startTime, endTime);
+//        AbstractSQLSubQuery query=discardUnnecessaryTuples(subquery,startTime,endTime,step);
+        return subquery;
+    }
+
+    private static  AbstractGroupSubQuery compileGroupInstantVector(GroupInstantVector vector) {
+
+        if(vector instanceof AggBy aggBy){
+            return null;
+        } else if (vector instanceof GroupBy groupBy) {
+
+            return new GroupBySQLSubQuery(groupBy.getColumns(), groupBy.getMetricName(), groupBy.getFilters());
+        } else if (vector instanceof GroupAggOverTime groupAggOverTime) {
+
+        }
+
+
+
+        return null;
+
+
+    }
+
+
+
 
 
     private static void pushDownTimeRangeFilter(AbstractSQLSubQuery query, Long startTime, Long endTime) {

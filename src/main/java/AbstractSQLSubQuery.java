@@ -9,11 +9,15 @@ public class AbstractSQLSubQuery {
             ast.RangeVector rv = GeneratedPromQLParser.parseRangeVector("metric{label='value'}[5m]");
             System.out.println("Range Vector AST: " + rv);
 
-            ast.GroupInstantVector groupAst = GroupPromQLParser.parseGroupInstant("sum_by(region, host)(metric{status='200'})");
+
+            ast.GroupInstantVector groupInstantVector = GroupPromQLParser.parseGroupInstant("group_by[region](ecommerce_sales_usd{category='books'})");
+            System.out.println("Parsed Group AST: " + groupInstantVector);
+
+            AbstractGroupSubQuery groupAst = PromQLCompiler.compileAndOptimizeGroupInstantVector(groupInstantVector,null,null,null);
             System.out.println("Group Instant AST: " + groupAst);
 
-            ast.GroupInstantVector recursiveGroup = GroupPromQLParser.parseGroupInstant("avg_over_time(sum_by(region)(metric)[1h])");
-            System.out.println("Recursive Group AST: " + recursiveGroup);
+//            ast.GroupInstantVector recursiveGroup = GroupPromQLParser.parseGroupInstant("avg_over_time(sum_by[region)(metric)[1h])");
+//            System.out.println("Recursive Group AST: " + recursiveGroup);
         } catch (Exception e) {
             e.printStackTrace();
         }

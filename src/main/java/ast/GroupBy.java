@@ -3,30 +3,24 @@ package ast;
 import java.util.List;
 import java.util.Map;
 
-public class AggBy implements GroupInstantVector {
-    private final String functionName;
+public class GroupBy implements GroupInstantVector {
     private final List<String> columns;
     private final String metricName;
     private final Map<String, String> filters;
-    private final String duration;
 
-    public AggBy(String functionName, List<String> columns, String metricName, Map<String, String> filters, String duration) {
-        this.functionName = functionName;
+    public GroupBy(List<String> columns, String metricName, Map<String, String> filters) {
         this.columns = columns;
         this.metricName = metricName;
         this.filters = filters;
-        this.duration = duration;
     }
 
-    public String getFunctionName() { return functionName; }
     public List<String> getColumns() { return columns; }
     public String getMetricName() { return metricName; }
     public Map<String, String> getFilters() { return filters; }
-    public String getDuration() { return duration; }
 
     @Override
     public String toString() {
-        StringBuilder sb = new StringBuilder(functionName).append("_by[");
+        StringBuilder sb = new StringBuilder("group_by[");
         sb.append(String.join(", ", columns)).append("](");
         sb.append(metricName);
         if (filters != null && !filters.isEmpty()) {
@@ -35,10 +29,8 @@ public class AggBy implements GroupInstantVector {
             sb.setLength(sb.length() - 1);
             sb.append("}");
         }
-        if (duration != null) {
-            sb.append("[").append(duration).append("]");
-        }
         sb.append(")");
         return sb.toString();
     }
 }
+

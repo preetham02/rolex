@@ -24,6 +24,10 @@ public class GroupPromQLParser {
                s.equalsIgnoreCase("stddev_samp_over_time");
     }
 
+    private boolean isGroupBy(String s) {
+        return s.equalsIgnoreCase("group_by");
+    }
+
     private boolean isAggBy(String s) {
         return s.equalsIgnoreCase("sum_by") || 
                s.equalsIgnoreCase("count_by") || 
@@ -53,6 +57,7 @@ TOKEN : {
   | < RPAREN: ")" >
   | < COMMA: "," >
   | < EQUALS: "=" >
+  | < GROUP_BY: "group_by" >
   | < NUMBER: (["0"-"9"])+ ("." (["0"-"9"])+)? >
   | < STRING: "\"" (~["\"","\\"] | "\\" ~[])* "\"" | "'" (~["'","\\"] | "\\" ~[])* "'" >
   | < DURATION: (["0"-"9"])+ ["s","m","h","d","w","y"] >
@@ -70,7 +75,8 @@ GroupInstantVector GroupInstant() :
 { GroupInstantVector node; Token t; }
 {
   (
-    LOOKAHEAD(<IDENTIFIER> <LPAREN>, { isAggBy(getToken(1).image) }) node = AggByClause()
+    LOOKAHEAD(<GROUP_BY>) node = GroupByClause()
+    | LOOKAHEAD(<IDENTIFIER> <LBRACKET>, { isAggBy(getToken(1).image) }) node = AggByClause()
     | LOOKAHEAD(<IDENTIFIER> <LPAREN>, { isAggOverTime(getToken(1).image) }) node = AggOverTime()
     | node = MetricSelector()
   )
@@ -82,7 +88,15 @@ GroupInstantVector MetricSelector() :
 {
   name = <IDENTIFIER>
   ( <LBRACE> FilterList(filters) <RBRACE> )?
-  { return new GroupMetricSelector(name.image, filters); }
+  { return new GroupBy(new ArrayList<String>(), name.image, filters); }
+}
+
+ast.MetricSelector ParseMetricSelector() :
+{ Token name; Map<String,String> filters = new HashMap<String,String>(); }
+{
+  name = <IDENTIFIER>
+  ( <LBRACE> FilterList(filters) <RBRACE> )?
+  { return new ast.MetricSelector(name.image, filters); }
 }
 
 void FilterList(Map<String,String> filters) :
@@ -93,18 +107,27 @@ void FilterList(Map<String,String> filters) :
   ( <COMMA> k = <IDENTIFIER> <EQUALS> v = <STRING> { filters.put(k.image, v.image.substring(1, v.image.length()-1)); } )*
 }
 
+GroupInstantVector GroupByClause() :
+{ List<String> cols = new ArrayList<String>(); ast.MetricSelector metric; }
+{
+    <GROUP_BY> <LBRACKET> ColumnList(cols) <RBRACKET> <LPAREN> metric = ParseMetricSelector() <RPAREN>
+    { return new GroupBy(cols, metric.getMetricName(), metric.getLabels()); }
+}
+
 GroupInstantVector AggByClause() :
-{ List<String> cols = new ArrayList<String>(); GroupInstantVector body; Token t; String aggName; }
+{ List<String> cols = new ArrayList<String>(); ast.MetricSelector metric; Token t; String aggName; Token duration; }
 {
     t = <IDENTIFIER>
     {
         if (!isAggBy(t.image)) {
-             throw new ParseException("Expected agg_by function (sum_by, count_by, avg_by), found: " + t.image);
+             throw new ParseException("Expected agg_by function (sum_by, etc.), found: " + t.image);
         }
         aggName = getAggName(t.image);
     }
-    <LPAREN> ColumnList(cols) <RPAREN> <LPAREN> body = GroupInstant() <RPAREN>
-    { return new AggBy(aggName, cols, body); }
+    <LBRACKET> ColumnList(cols) <RBRACKET> <LPAREN> metric = ParseMetricSelector() <LBRACKET> duration = <DURATION> <RBRACKET> <RPAREN>
+    { 
+       return new AggBy(aggName, cols, metric.getMetricName(), metric.getLabels(), duration.image);
+    }
 }
 
 void ColumnList(List<String> cols) :
