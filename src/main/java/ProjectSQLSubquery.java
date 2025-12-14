@@ -14,6 +14,6 @@ public class ProjectSQLSubquery extends AbstractSQLSubQuery{
 
     @Override
     public String toString() {
-        return "SELECT " + String.join(", ", projectedColumns) + " FROM (" + innerSubquery.toString() + ")";
+        return "SELECT " + String.join(", ", projectedColumns) + " FROM ( " + innerSubquery.toString() + " ) sub";
     }
 }

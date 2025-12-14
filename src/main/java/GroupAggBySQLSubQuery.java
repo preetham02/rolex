@@ -1,7 +1,7 @@
 import java.util.List;
 import java.util.Map;
 
-public class AggBySQLSubQuery extends AbstractGroupSubQuery {
+public class GroupAggBySQLSubQuery  extends AbstractGroupSubQuery{
 
     private final String functionName;
     private final List<String> columns;
@@ -9,7 +9,7 @@ public class AggBySQLSubQuery extends AbstractGroupSubQuery {
     private final List<SelectSQLSubQuery.WhereCondition> filters;
     private final String duration;
 
-    public AggBySQLSubQuery(String functionName, List<String> columns, String metricName, Map<String, String> filters, String duration) {
+    public GroupAggBySQLSubQuery(String functionName, List<String> columns, String metricName, Map<String, String> filters, String duration) {
         this.functionName = functionName;
         this.columns = columns;
         this.metricName = metricName;
@@ -20,6 +20,7 @@ public class AggBySQLSubQuery extends AbstractGroupSubQuery {
     public List<String> getColumns() {
         return columns;
     }
+
 
     public void pushDownFilter(List<SelectSQLSubQuery.WhereCondition> newFilters) {
         this.filters.addAll(newFilters);
@@ -35,5 +36,7 @@ public class AggBySQLSubQuery extends AbstractGroupSubQuery {
                "  FROM " + metricName +
                ( filters.isEmpty() ? "" : (" WHERE " + String.join(" AND ", filters.stream().map( whereCondition -> whereCondition.columnName + whereCondition.operator + whereCondition.value).toArray(String[]::new))));
     }
+
+
 
 }

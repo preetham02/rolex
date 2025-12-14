@@ -1,4 +1,5 @@
 import ast.InstantVector;
+import ast.GroupInstantVector;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
@@ -110,10 +111,12 @@ public class PromServer {
         String start = params.get("start");
         String end = params.get("end");
         String step = params.get("step");
+        String time = params.get("time"); // for instant queries
         
         Long startTs = parseTimestamp(start);
         Long endTs = parseTimestamp(end);
         Long stepDuration = parseStep(step);
+        Long timeTs = parseTimestamp(time);
 
         String timestamp = DateTimeFormatter.ISO_INSTANT.format(Instant.now());
         
@@ -125,13 +128,40 @@ public class PromServer {
             if (start != null) System.out.println("    Start:  " + start + " -> " + startTs);
             if (end != null)   System.out.println("    End:    " + end + " -> " + endTs);
             if (step != null)  System.out.println("    Step:   " + step + " -> " + stepDuration);
+            if (time != null)  System.out.println("    Time:   " + time + " -> " + timeTs);
 
-            String sql = convertPromToSQL(promQuery, startTs, endTs, stepDuration);
+            // Determine if it's a Group PromQL query or standard PromQL
+            boolean isGroupQuery = false;
+            String sql;
+            try {
+                InstantVector instantVector = GeneratedPromQLParser.parseInstantVector(promQuery);
+                AbstractSQLSubQuery sqlSubQuery = PromQLCompiler.compileAndOptimizeInstantVector(instantVector, startTs, endTs, stepDuration, timeTs);
+                sql = sqlSubQuery + ";";
+            } catch (Exception e) {
+                try {
+                    ast.GroupInstantVector groupInstantVector = GroupPromQLParser.parseGroupInstant(promQuery);
+                    AbstractGroupSubQuery groupSubQuery = PromQLCompiler.compileAndOptimizeGroupInstantVector(groupInstantVector, startTs, endTs, stepDuration, timeTs);
+                    sql = groupSubQuery + ";";
+                    isGroupQuery = true;
+                } catch (Exception ex) {
+                    // Both parsing attempts failed
+                    e.printStackTrace();
+                    String errorResponse = "{\"status\":\"error\",\"errorType\":\"parse_error\",\"error\":\"" + e.getMessage() + "\"}";
+                    sendResponse(t, errorResponse);
+                    return;
+                }
+            }
+
             System.out.println("    SQL:    " + sql);
 
             try {
                 String responseJson = executeQuery(sql);
-                String promResponse = transformToPromResponse(responseJson, resultType);
+                String promResponse;
+                if (isGroupQuery) {
+                    promResponse = transformGroupToPromResponse(responseJson, resultType);
+                } else {
+                    promResponse = transformToPromResponse(responseJson, resultType);
+                }
                 sendResponse(t, promResponse);
             } catch (Exception e) {
                 e.printStackTrace();
@@ -172,45 +202,30 @@ public class PromServer {
         }
     }
 
-    public static String convertPromToSQL(String promQuery, Long startTs, Long endTs, Long stepDuration) throws ParseException {
-
-
-       InstantVector instantVector = GeneratedPromQLParser.parseInstantVector(promQuery);
-
-      AbstractSQLSubQuery sqlSubQuery= PromQLCompiler.compileAndOptimizeInstantVector(instantVector, startTs, endTs, stepDuration);
-
-        return sqlSubQuery + ";";
-
-
-
-//        PromQLNode root = new PromQLParser().parse(promQuery);
-//        AbstractSQLSubQuery sqlSubQuery = visitRoot(root, startTs, endTs, stepDuration);
-//
-//        if(startTs == null || endTs == null || stepDuration == null) {
-//            return sqlSubQuery + ";";
-//        }
-//
-//
-//        SelectSQLSubQuery sqlSubQuery1 = new SelectSQLSubQuery(
-//                List.of(
-//                        new SelectSQLSubQuery.WhereCondition("timestamp", ">=", String.valueOf(startTs)),
-//                        new SelectSQLSubQuery.WhereCondition("timestamp", "<=", String.valueOf(endTs)),
-//                        new SelectSQLSubQuery.WhereCondition( String.format(" ( timestamp - %s) %% %s ",startTs, stepDuration) , "=", "0")
-//
-//                ),
-//                sqlSubQuery
-//        );
-//
-//
-//        return sqlSubQuery1 + ";";
-
+    public static String convertPromToSQL(String promQuery, Long startTs, Long endTs, Long stepDuration, Long timeTs) throws ParseException {
+        try {
+            InstantVector instantVector = GeneratedPromQLParser.parseInstantVector(promQuery);
+            AbstractSQLSubQuery sqlSubQuery = PromQLCompiler.compileAndOptimizeInstantVector(instantVector, startTs, endTs, stepDuration,timeTs);
+            return sqlSubQuery + ";";
+        } catch (Exception e) {
+            // If normal parsing fails, try GroupPromQL
+            try {
+                ast.GroupInstantVector groupInstantVector = GroupPromQLParser.parseGroupInstant(promQuery);
+                AbstractGroupSubQuery groupSubQuery = PromQLCompiler.compileAndOptimizeGroupInstantVector(groupInstantVector, startTs, endTs, stepDuration, timeTs);
+                return groupSubQuery + ";";
+                // AbstractGroupSubQuery groupSubQuery = PromQLCompiler.compileAndOptimizeGroupInstantVector(groupInstantVector, startTs, endTs, stepDuration);
+                // For now returning dummy until compiler is implemented
+//                return "SELECT 1;";
+            } catch (Exception ex) {
+                // If both fail, rethrow original exception or a combined one
+                throw e; // Or parse exception from first attempt
+            }
+        }
     }
 
     public static AbstractSQLSubQuery averageQuery(AbstractSQLSubQuery subQuery, MetricNode metricNode)
     {
         return new AverageSQLSubquery(subQuery, metricNode.getRangeDuration());
-
-
     }
 
 
@@ -524,14 +539,23 @@ public class PromServer {
                         // Handle nested object if "SELECT *" (key is bucket name)
                         if (val.trim().startsWith("{")) {
                             Map<String, String> innerFields = extractFields(val);
-                            for (Map.Entry<String, String> inner : innerFields.entrySet()) {
-                                String innerKey = inner.getKey();
-                                String innerVal = inner.getValue();
-                                if (isTimestamp(innerKey)) timestampStr = innerVal;
-                                else if (isValue(innerKey)) valueStr = innerVal;
-                                else labels.put(innerKey, innerVal.replace("\"", ""));
+                            if (key.equals("group")) {
+                                // Handle special "group" object for GroupPromQL
+                                for (Map.Entry<String, String> inner : innerFields.entrySet()) {
+                                    labels.put(inner.getKey(), inner.getValue().replace("\"", ""));
+                                }
+                            } else {
+                                for (Map.Entry<String, String> inner : innerFields.entrySet()) {
+                                    String innerKey = inner.getKey();
+                                    String innerVal = inner.getValue();
+                                    if (isTimestamp(innerKey)) timestampStr = innerVal;
+                                    else if (isValue(innerKey)) valueStr = innerVal;
+                                    else labels.put(innerKey, innerVal.replace("\"", ""));
+                                }
+                                if (!key.equals("group")) { // Avoid overwriting __name__ with 'group'
+                                     labels.putIfAbsent("__name__", key);
+                                }
                             }
-                             labels.put("__name__", key);
                         } else {
                             if (isTimestamp(key)) timestampStr = val;
                             else if (isValue(key)) valueStr = val;
@@ -622,6 +646,158 @@ public class PromServer {
             """.formatted(resultType, resultBuilder.toString());
     }
 
+    // Group-vector response formatter:
+    // Input rows are expected to include: {"group":{...},"timestamp":...,"value":...}
+    // Output Prometheus-style matrix where metric labels come ONLY from the "group" object.
+    private static String transformGroupToPromResponse(String couchbaseJson, String resultType) {
+        Pattern resultsPattern = Pattern.compile("\"results\"\\s*:\\s*\\[(.*?)\\]", Pattern.DOTALL);
+        Matcher resultsMatcher = resultsPattern.matcher(couchbaseJson);
+
+        StringBuilder resultBuilder = new StringBuilder();
+        resultBuilder.append("[");
+
+        if (resultsMatcher.find()) {
+            String resultsContent = resultsMatcher.group(1);
+            if (!resultsContent.trim().isEmpty()) {
+                List<String> rows = extractJsonObjects(resultsContent);
+
+                // group by group labels (from the "group" object only)
+                Map<Map<String, String>, List<Map<String, Object>>> groupedSeries = new HashMap<>();
+
+                for (String row : rows) {
+                    Map<String, String> fields = extractFields(row);
+
+                    String groupObj = fields.get("group");
+                    String timestampStr = fields.get("timestamp");
+                    String valueStr = fields.get("value");
+
+                    Map<String, String> labels = new HashMap<>();
+                    if (groupObj != null && groupObj.trim().startsWith("{")) {
+                        Map<String, String> groupFields = extractFields(groupObj);
+                        for (Map.Entry<String, String> e : groupFields.entrySet()) {
+                            labels.put(e.getKey(), e.getValue().replace("\"", ""));
+                        }
+                    }
+                    // Helps Grafana/Prometheus tooling that expects a __name__ label to exist.
+                    labels.putIfAbsent("__name__", "group");
+
+                    // Support both shapes:
+                    // 1) timestamp: 1764565800000, value: 183.58
+                    // 2) timestamp: [t1,t2,...], value: [v1,v2,...]
+                    if (timestampStr != null && timestampStr.trim().startsWith("[")
+                            && valueStr != null && valueStr.trim().startsWith("[")) {
+                        List<String> tsList = parseJsonArrayElements(timestampStr);
+                        List<String> valList = parseJsonArrayElements(valueStr);
+                        int n = Math.min(tsList.size(), valList.size());
+                        for (int idx = 0; idx < n; idx++) {
+                            long ts = parseTimestampSeconds(tsList.get(idx));
+                            String cleanVal = valList.get(idx).replace("\"", "").trim();
+                            groupedSeries.computeIfAbsent(labels, k -> new ArrayList<>())
+                                    .add(Map.of("ts", ts, "val", cleanVal));
+                        }
+                    } else {
+                        long ts = parseTimestampSeconds(timestampStr);
+                        String cleanVal = valueStr == null ? "0" : valueStr.replace("\"", "").trim();
+                        groupedSeries.computeIfAbsent(labels, k -> new ArrayList<>())
+                                .add(Map.of("ts", ts, "val", cleanVal));
+                    }
+                }
+
+                boolean firstGroup = true;
+                for (Map.Entry<Map<String, String>, List<Map<String, Object>>> entry : groupedSeries.entrySet()) {
+                    if (!firstGroup) resultBuilder.append(",");
+                    firstGroup = false;
+
+                    Map<String, String> labels = entry.getKey();
+                    List<Map<String, Object>> values = entry.getValue();
+                    values.sort((a, b) -> Long.compare((Long) a.get("ts"), (Long) b.get("ts")));
+
+                    StringBuilder metricBuilder = new StringBuilder();
+                    metricBuilder.append("{");
+                    metricBuilder.append("\"metric\":{");
+                    boolean firstLabel = true;
+                    for (Map.Entry<String, String> label : labels.entrySet()) {
+                        if (!firstLabel) metricBuilder.append(",");
+                        metricBuilder.append("\"").append(label.getKey()).append("\":\"").append(label.getValue()).append("\"");
+                        firstLabel = false;
+                    }
+                    metricBuilder.append("},");
+
+                    if ("vector".equals(resultType)) {
+                        // For /api/v1/query Grafana expects a vector: use the last point
+                        if (!values.isEmpty()) {
+                            Map<String, Object> point = values.get(values.size() - 1);
+                            metricBuilder.append("\"value\":[")
+                                    .append(point.get("ts"))
+                                    .append(",\"")
+                                    .append(point.get("val"))
+                                    .append("\"]");
+                        } else {
+                            metricBuilder.append("\"value\":[")
+                                    .append(Instant.now().getEpochSecond())
+                                    .append(",\"0\"]");
+                        }
+                    } else {
+                        // For /api/v1/query_range Grafana expects a matrix
+                        metricBuilder.append("\"values\":[");
+                        boolean firstVal = true;
+                        for (Map<String, Object> point : values) {
+                            if (!firstVal) metricBuilder.append(",");
+                            firstVal = false;
+                            metricBuilder.append("[").append(point.get("ts")).append(",\"").append(point.get("val")).append("\"]");
+                        }
+                        metricBuilder.append("]");
+                    }
+                    metricBuilder.append("}");
+
+                    resultBuilder.append(metricBuilder);
+                }
+            }
+        }
+
+        resultBuilder.append("]");
+
+        String finalType = "vector".equals(resultType) ? "vector" : "matrix";
+        return """
+            {
+                "status": "success",
+                "data": {
+                    "resultType": "%s",
+                    "result": %s
+                }
+            }
+            """.formatted(finalType, resultBuilder.toString());
+    }
+
+    private static long parseTimestampSeconds(String timestampStr) {
+        if (timestampStr == null) return Instant.now().getEpochSecond();
+        try {
+            String cleanTs = timestampStr.replace("\"", "");
+            if (cleanTs.contains("-")) {
+                return Instant.parse(cleanTs).getEpochSecond();
+            }
+            long ts = (long) Double.parseDouble(cleanTs);
+            // if ms, convert to seconds
+            if (ts > 100000000000L) return ts / 1000;
+            return ts;
+        } catch (Exception e) {
+            return Instant.now().getEpochSecond();
+        }
+    }
+
+    private static List<String> parseJsonArrayElements(String jsonArray) {
+        String s = jsonArray.trim();
+        if (s.startsWith("[")) s = s.substring(1);
+        if (s.endsWith("]")) s = s.substring(0, s.length() - 1);
+        s = s.trim();
+        if (s.isEmpty()) return List.of();
+        // This is good enough for arrays of numbers/strings with no nested arrays/objects.
+        return java.util.Arrays.stream(s.split(","))
+                .map(String::trim)
+                .filter(x -> !x.isEmpty())
+                .toList();
+    }
+
     private static boolean isTimestamp(String key) {
         return key.equalsIgnoreCase("timestamp") || key.equalsIgnoreCase("time") || key.equalsIgnoreCase("t");
     }
@@ -689,6 +865,24 @@ public class PromServer {
                     char c = content.charAt(j);
                     if (c == '{') depth++;
                     else if (c == '}') {
+                        depth--;
+                        if (depth == 0) {
+                            valEnd = j + 1;
+                            break;
+                        }
+                    }
+                }
+            } else if (i < len && content.charAt(i) == '[') {
+                int depth = 0;
+                boolean inStr = false;
+                for (int j = i; j < len; j++) {
+                    char c = content.charAt(j);
+                    if (c == '"' && (j == 0 || content.charAt(j - 1) != '\\')) {
+                        inStr = !inStr;
+                    }
+                    if (inStr) continue;
+                    if (c == '[') depth++;
+                    else if (c == ']') {
                         depth--;
                         if (depth == 0) {
                             valEnd = j + 1;
