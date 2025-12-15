@@ -1,26 +1,28 @@
 package ast;
 
-import java.util.Map;
+import java.util.List;
 
 public class MetricSelector extends InstantVector {
     private final String metricName;
-    private final Map<String, String> labels;
+    private final List<LabelFilter> labelFilters;
 
-    public MetricSelector(String metricName, Map<String, String> labels) {
+    public MetricSelector(String metricName, List<LabelFilter> labelFilters) {
         this.metricName = metricName;
-        this.labels = labels;
+        this.labelFilters = labelFilters;
     }
 
     public String getMetricName() { return metricName; }
-    public Map<String, String> getLabels() { return labels; }
+    public List<LabelFilter> getLabelFilters() { return labelFilters; }
 
     @Override
     public String toString() {
         StringBuilder sb = new StringBuilder(metricName);
-        if (labels != null && !labels.isEmpty()) {
+        if (labelFilters != null && !labelFilters.isEmpty()) {
             sb.append("{");
-            labels.forEach((k, v) -> sb.append(k).append("='").append(v).append("',"));
-            sb.setLength(sb.length() - 1); // remove last comma
+            for (LabelFilter f : labelFilters) {
+                sb.append(f.toString()).append(",");
+            }
+            sb.setLength(sb.length() - 1);
             sb.append("}");
         }
         return sb.toString();

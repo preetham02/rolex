@@ -1,14 +1,13 @@
 package ast;
 
 import java.util.List;
-import java.util.Map;
 
 public class GroupBy implements GroupInstantVector {
     private final List<String> columns;
     private final String metricName;
-    private final Map<String, String> filters;
+    private final List<LabelFilter> filters;
 
-    public GroupBy(List<String> columns, String metricName, Map<String, String> filters) {
+    public GroupBy(List<String> columns, String metricName, List<LabelFilter> filters) {
         this.columns = columns;
         this.metricName = metricName;
         this.filters = filters;
@@ -16,7 +15,7 @@ public class GroupBy implements GroupInstantVector {
 
     public List<String> getColumns() { return columns; }
     public String getMetricName() { return metricName; }
-    public Map<String, String> getFilters() { return filters; }
+    public List<LabelFilter> getFilters() { return filters; }
 
     @Override
     public String toString() {
@@ -25,7 +24,9 @@ public class GroupBy implements GroupInstantVector {
         sb.append(metricName);
         if (filters != null && !filters.isEmpty()) {
             sb.append("{");
-            filters.forEach((k, v) -> sb.append(k).append("='").append(v).append("',"));
+            for (LabelFilter f : filters) {
+                sb.append(f.toString()).append(",");
+            }
             sb.setLength(sb.length() - 1);
             sb.append("}");
         }

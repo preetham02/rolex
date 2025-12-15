@@ -11,6 +11,7 @@ import ast.RangeVector;
 import ast.Scalar;
 import ast.SingularFunction;
 import ast.GroupBy;
+import ast.LabelFilter;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -210,9 +211,12 @@ public class PromQLCompiler {
 
     private  static AbstractSQLSubQuery compileMetricSelector(MetricSelector metricSelector) {
         List<SelectSQLSubQuery.WhereCondition> whereConditions = new ArrayList<>();
-        for (var entry : metricSelector.getLabels().entrySet()) {
-            SelectSQLSubQuery.WhereCondition condition = new SelectSQLSubQuery.WhereCondition(entry.getKey(), "=", "\"" + entry.getValue() + "\"");
-            whereConditions.add(condition);
+        if (metricSelector.getLabelFilters() != null) {
+            for (LabelFilter f : metricSelector.getLabelFilters()) {
+                SelectSQLSubQuery.WhereCondition condition =
+                    new SelectSQLSubQuery.WhereCondition(f.getKey(), f.getOperator(), "\"" + f.getValue() + "\"");
+                whereConditions.add(condition);
+            }
         }
         AbstractSQLSubQuery query = new CollectionSQLSubQuery(metricSelector.getMetricName());
         return new SelectSQLSubQuery(whereConditions, query);

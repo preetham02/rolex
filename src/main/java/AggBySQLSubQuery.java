@@ -1,5 +1,5 @@
 import java.util.List;
-import java.util.Map;
+import ast.LabelFilter;
 
 public class AggBySQLSubQuery extends AbstractGroupSubQuery {
 
@@ -9,7 +9,7 @@ public class AggBySQLSubQuery extends AbstractGroupSubQuery {
     private final List<SelectSQLSubQuery.WhereCondition> filters;
     private final String duration;
 
-    public AggBySQLSubQuery(String functionName, List<String> columns, String metricName, Map<String, String> filters, String duration) {
+    public AggBySQLSubQuery(String functionName, List<String> columns, String metricName, List<LabelFilter> filters, String duration) {
         this.functionName = functionName;
         this.columns = columns;
         this.metricName = metricName;

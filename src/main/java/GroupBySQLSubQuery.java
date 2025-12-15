@@ -1,6 +1,6 @@
 import java.sql.Struct;
 import java.util.List;
-import java.util.Map;
+import ast.LabelFilter;
 
 public class GroupBySQLSubQuery extends AbstractGroupSubQuery {
 
@@ -8,7 +8,7 @@ public class GroupBySQLSubQuery extends AbstractGroupSubQuery {
     private final String metricName;
     private final List<SelectSQLSubQuery.WhereCondition> filters;
 
-    public GroupBySQLSubQuery(List<String> columns, String metricName, Map<String, String> filters) {
+    public GroupBySQLSubQuery(List<String> columns, String metricName, List<LabelFilter> filters) {
         super();
         this.columns = columns;
         this.metricName = metricName;

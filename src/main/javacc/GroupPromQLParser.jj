@@ -21,6 +21,7 @@ public class GroupPromQLParser {
                s.equalsIgnoreCase("min_over_time") || 
                s.equalsIgnoreCase("max_over_time") || 
                s.equalsIgnoreCase("avg_over_time") || 
+               s.equalsIgnoreCase("stddev_over_time") ||
                s.equalsIgnoreCase("stddev_samp_over_time");
     }
 
@@ -56,6 +57,7 @@ TOKEN : {
   | < LPAREN: "(" >
   | < RPAREN: ")" >
   | < COMMA: "," >
+  | < NEQ: "!=" >
   | < EQUALS: "=" >
   | < GROUP_BY: "group_by" >
   | < NUMBER: (["0"-"9"])+ ("." (["0"-"9"])+)? >
@@ -84,7 +86,7 @@ GroupInstantVector GroupInstant() :
 }
 
 GroupInstantVector MetricSelector() :
-{ Token name; Map<String,String> filters = new HashMap<String,String>(); }
+{ Token name; List<LabelFilter> filters = new ArrayList<LabelFilter>(); }
 {
   name = <IDENTIFIER>
   ( <LBRACE> FilterList(filters) <RBRACE> )?
@@ -92,26 +94,28 @@ GroupInstantVector MetricSelector() :
 }
 
 ast.MetricSelector ParseMetricSelector() :
-{ Token name; Map<String,String> filters = new HashMap<String,String>(); }
+{ Token name; List<LabelFilter> filters = new ArrayList<LabelFilter>(); }
 {
   name = <IDENTIFIER>
   ( <LBRACE> FilterList(filters) <RBRACE> )?
   { return new ast.MetricSelector(name.image, filters); }
 }
 
-void FilterList(Map<String,String> filters) :
-{ Token k, v; }
+void FilterList(List<LabelFilter> filters) :
+{ Token k, v, op; }
 {
-  k = <IDENTIFIER> <EQUALS> v = <STRING>
-  { filters.put(k.image, v.image.substring(1, v.image.length()-1)); }
-  ( <COMMA> k = <IDENTIFIER> <EQUALS> v = <STRING> { filters.put(k.image, v.image.substring(1, v.image.length()-1)); } )*
+  k = <IDENTIFIER> ( op=<EQUALS> | op=<NEQ> ) v = <STRING>
+  { filters.add(new LabelFilter(k.image, op.image, v.image.substring(1, v.image.length()-1))); }
+  ( <COMMA> k = <IDENTIFIER> ( op=<EQUALS> | op=<NEQ> ) v = <STRING>
+    { filters.add(new LabelFilter(k.image, op.image, v.image.substring(1, v.image.length()-1))); }
+  )*
 }
 
 GroupInstantVector GroupByClause() :
 { List<String> cols = new ArrayList<String>(); ast.MetricSelector metric; }
 {
     <GROUP_BY> <LBRACKET> ColumnList(cols) <RBRACKET> <LPAREN> metric = ParseMetricSelector() <RPAREN>
-    { return new GroupBy(cols, metric.getMetricName(), metric.getLabels()); }
+    { return new GroupBy(cols, metric.getMetricName(), metric.getLabelFilters()); }
 }
 
 GroupInstantVector AggByClause() :
@@ -126,7 +130,7 @@ GroupInstantVector AggByClause() :
     }
     <LBRACKET> ColumnList(cols) <RBRACKET> <LPAREN> metric = ParseMetricSelector() <LBRACKET> duration = <DURATION> <RBRACKET> <RPAREN>
     { 
-       return new AggBy(aggName, cols, metric.getMetricName(), metric.getLabels(), duration.image);
+       return new AggBy(aggName, cols, metric.getMetricName(), metric.getLabelFilters(), duration.image);
     }
 }
 

@@ -84,6 +84,7 @@ TOKEN : {
   | < LPAREN: "(" >
   | < RPAREN: ")" >
   | < COMMA: "," >
+  | < NEQ: "!=" >
   | < EQUALS: "=" >
   | < NUMBER: (["0"-"9"])+ ("." (["0"-"9"])+)? >
   | < STRING: "\"" (~["\"","\\"] | "\\" ~[])* "\"" | "'" (~["'","\\"] | "\\" ~[])* "'" >
@@ -156,7 +157,7 @@ InstantVector Term() :
 }
 
 InstantVector MetricSelector() :
-{ Token name; Map<String,String> filters = new HashMap<String,String>(); }
+{ Token name; List<LabelFilter> filters = new ArrayList<LabelFilter>(); }
 {
   name = <IDENTIFIER>
   ( <LBRACE> FilterList(filters) <RBRACE> )?
@@ -181,12 +182,14 @@ RangeVector RangeExpr() :
     { return rv; }
 }
 
-void FilterList(Map<String,String> filters) :
-{ Token k, v; }
+void FilterList(List<LabelFilter> filters) :
+{ Token k, v, op; }
 {
-  k = <IDENTIFIER> <EQUALS> v = <STRING>
-  { filters.put(k.image, v.image.substring(1, v.image.length()-1)); }
-  ( <COMMA> k = <IDENTIFIER> <EQUALS> v = <STRING> { filters.put(k.image, v.image.substring(1, v.image.length()-1)); } )*
+  k = <IDENTIFIER> ( op=<EQUALS> | op=<NEQ> ) v = <STRING>
+  { filters.add(new LabelFilter(k.image, op.image, v.image.substring(1, v.image.length()-1))); }
+  ( <COMMA> k = <IDENTIFIER> ( op=<EQUALS> | op=<NEQ> ) v = <STRING>
+    { filters.add(new LabelFilter(k.image, op.image, v.image.substring(1, v.image.length()-1))); }
+  )*
 }
 
 InstantVector FunctionCall() :
