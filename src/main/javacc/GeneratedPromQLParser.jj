@@ -64,6 +64,7 @@ public class GeneratedPromQLParser {
                s.equalsIgnoreCase("min_over_time") || 
                s.equalsIgnoreCase("max_over_time") || 
                s.equalsIgnoreCase("avg_over_time") || 
+               s.equalsIgnoreCase("stddev_over_time") ||
                s.equalsIgnoreCase("stddev_samp_over_time");
     }
 }
@@ -100,19 +101,43 @@ InstantVector StartInstant() :
 RangeVector StartRange() :
 { RangeVector node; }
 {
-  node = RangeVector() <EOF>
+  node = RangeExpr() <EOF>
   { return node; }
 }
 
 InstantVector Expression() :
+{ InstantVector node; }
+{
+  node = AddExpr()
+  { return node; }
+}
+
+InstantVector AddExpr() :
+{ InstantVector left; Node right; Token op; }
+{
+  left = MulExpr()
+  (
+    ( op=<PLUS> | op=<MINUS> )
+    (
+      LOOKAHEAD(<NUMBER>) right = Scalar()
+      | LOOKAHEAD(AggScalar()) right = Scalar()
+      | right = MulExpr()
+    )
+    { left = new BinaryOp(left, op.image, right); }
+  )*
+  { return left; }
+}
+
+InstantVector MulExpr() :
 { InstantVector left; Node right; Token op; }
 {
   left = Term()
   (
-    ( op=<PLUS> | op=<MINUS> | op=<MULT> | op=<DIV> )
+    ( op=<MULT> | op=<DIV> )
     (
-      LOOKAHEAD(Term()) right = Term()
-      | right = Scalar()
+      LOOKAHEAD(<NUMBER>) right = Scalar()
+      | LOOKAHEAD(AggScalar()) right = Scalar()
+      | right = Term()
     )
     { left = new BinaryOp(left, op.image, right); }
   )*
@@ -146,6 +171,16 @@ RangeVector RangeVector() :
     { return new RangeVector(vec, duration.image); }
 }
 
+RangeVector RangeExpr() :
+{ RangeVector rv; }
+{
+    (
+      LOOKAHEAD(<LPAREN> RangeVector() <RPAREN>) <LPAREN> rv = RangeVector() <RPAREN>
+      | rv = RangeVector()
+    )
+    { return rv; }
+}
+
 void FilterList(Map<String,String> filters) :
 { Token k, v; }
 {
@@ -167,7 +202,7 @@ InstantVector FunctionCall() :
     (
        {
            if (isAggOverTime(funcName.image)) {
-               arg = RangeVector();
+               arg = RangeExpr();
            } else {
                arg = Expression();
            }

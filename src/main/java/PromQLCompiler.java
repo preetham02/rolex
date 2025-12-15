@@ -41,13 +41,13 @@ public class PromQLCompiler {
         List<SelectSQLSubQuery.WhereCondition> whereConditions = new ArrayList<>();
 
         if(startTime != null && endTime != null && step != null) {
-            whereConditions.add(new SelectSQLSubQuery.WhereCondition("timestamp", ">=", String.valueOf(startTime)));
-            whereConditions.add(new SelectSQLSubQuery.WhereCondition("timestamp", "<=", String.valueOf(endTime)));
+            whereConditions.add(new SelectSQLSubQuery.WhereCondition("meta().id", ">=", "\""+String.valueOf(startTime)+"\""));
+            whereConditions.add(new SelectSQLSubQuery.WhereCondition("meta().id", "<=", "\""+String.valueOf(endTime)+"\""));
 //            whereConditions.add( new SelectSQLSubQuery.WhereCondition( String.format(" ( timestamp - %s) %% %s ",startTime, step) , "=", "0"));
         }
 
         if(timeTs !=null){
-            whereConditions.add(new SelectSQLSubQuery.WhereCondition("timestamp", "=", String.valueOf(timeTs)));
+            whereConditions.add(new SelectSQLSubQuery.WhereCondition("meta().id", "=", String.valueOf(timeTs)));
         }
 
         if(query instanceof AggBySQLSubQuery sub){
